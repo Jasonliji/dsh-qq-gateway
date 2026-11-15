@@ -45,7 +45,7 @@ const AccountSchema = Schema.object({
     .description('这个号的消息投进哪个 DSH 会话。带不带 session- 前缀都认。留空就只发不收'),
   owner: Schema.string()
     .default('')
-    .description('这个号上哪个 QQ 说的话算指令。投递时会标成［主人］，其余标［外人］，上层据此分开处置'),
+    .description('这个号上哪个 QQ 说的话算指令。只填一个号。投递时会标成［主人］，其余标［外人］，上层据此分开处置'),
   allow: Schema.object({
     private: Schema.array(Schema.string()).default([]).description('允许私聊的 QQ 号。留空 = 谁都不理'),
     groups: Schema.array(Schema.string()).default([]).description('允许的群号。留空 = 哪个群都不理')
@@ -65,9 +65,18 @@ export const Config = Schema.object({
   groupWakeMode: Schema.string()
     .default('mention')
     .description('群聊什么时候唤醒：mention = 只在被点名、被拍、被引用时投（闲聊只记账，被叫时一起带过去）；all = 来一条投一条，吵且费'),
+  groupWakeRandom: Schema.boolean()
+    .default(true)
+    .description('概率唤醒的总开关。开着才按下面的概率和间隔醒；关掉就一条都不掷，群里只有被点名、被拍、被引用时才醒'),
+  groupWakeProbability: Schema.number()
+    .default(0)
+    .description('群聊没被点名时，每条消息按这个概率唤醒（0~1）。0 = 从不，0.1 = 十个百分点。醒来之后说不说话由人格定，可以只看一眼'),
+  wakeGuidance: Schema.string()
+    .default('')
+    .description('醒过来之后该怎么做事。拼在唤醒消息头部下面，模型第一眼看到。例：看见话题想加入就加入，没兴趣当看了一眼，可以沉默。留空就不拼'),
   contextMaxCount: Schema.number()
-    .default(20)
-    .description('被叫起来时最多带前几条攒下的消息。按条数和字符双卡，超了丢老的'),
+    .default(3)
+    .description('被叫起来时最多带前几条攒下的消息，只带最近的。按条数和字符双卡，超了丢老的'),
   contextMaxChars: Schema.number()
     .default(6000)
     .description('被叫起来时最多带多少字符的前因。攒了一天的闲聊不能一股脑全塞进去，那样一次比每条都投还贵'),

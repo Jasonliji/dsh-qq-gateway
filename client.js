@@ -244,7 +244,8 @@ window.__ModuleLoader__.load({
             style: INPUT, value: v.uin || "", placeholder: acc.selfId || "填这个连接对应的 QQ 号",
             onChange: (e) => set("uin", e.target.value),
           }),
-          mismatch ? actual + "，跟你填的对不上" : actual),
+          (mismatch ? actual + "，跟你填的对不上" : actual) +
+            "。填这个连接该是哪个号，对不上会标出来——省得端口接错，消息串进别人的会话"),
         SettingsField("关联对话",
           h("select", {
             style: SELECT, value: v.session || "",
@@ -286,6 +287,7 @@ window.__ModuleLoader__.load({
       const [note, setNote] = React.useState("");
       const [busy, setBusy] = React.useState(false);
       const [editorReady, setEditorReady] = React.useState(true);
+      const [wake, setWake] = React.useState({ enabled: true, probabilityPercent: 0, intervalMin: 10, guidance: "", contextCount: 3, contextChars: 6000 });
 
       const load = React.useCallback(async () => {
         try {
@@ -296,6 +298,7 @@ window.__ModuleLoader__.load({
           if (!a || !a.ok) { setNote((a && a.error) || "读不到状态"); return; }
           setAccounts(Array.isArray(a.accounts) ? a.accounts : []);
           setEditorReady(a.editor !== false);
+          if (a.wake) setWake(a.wake);
           const next = {};
           for (const acc of a.accounts || []) {
             next[acc.id] = {
@@ -327,6 +330,19 @@ window.__ModuleLoader__.load({
         setNote("存…");
         try {
           const payload = {
+            // 这三项是全局的，一份管三个号，跟账号那句分开提。
+            // 关着的时候只提交 enabled：下面那几项这会儿是灰的、改不了，
+            // 一并提交等于拿打开页面时读的旧值去覆盖别人刚改的。
+            wake: wake.enabled === false
+              ? { enabled: false }
+              : {
+                enabled: true,
+                probabilityPercent: wake.probabilityPercent,
+                intervalMin: wake.intervalMin,
+                guidance: wake.guidance,
+                contextCount: wake.contextCount,
+                contextChars: wake.contextChars,
+              },
             accounts: Object.entries(draft).map(([id, v]) => ({
               id,
               label: v.label,
@@ -359,6 +375,76 @@ window.__ModuleLoader__.load({
       return h("div", { style: { display: "flex", flexDirection: "column", gap: "14px", maxWidth: "620px" } },
         h("div", { style: { fontSize: "12px", opacity: 0.65, lineHeight: "1.7" } },
           "这里的每一个就是侧边栏那个面板里的一行。改完点保存，直接写进 profile 配置并立刻重连——那几秒收不到消息。"),
+        h("div", { style: CARD },
+          h("div", { style: { display: "flex", alignItems: "baseline", gap: "8px" } },
+            h("span", { style: { fontWeight: 600, fontSize: "13px" } }, "群聊唤醒"),
+            h("span", { style: { opacity: 0.5, fontSize: "11px" } }, "这一块不按号分，一份管三个号")),
+          h("label", { style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" } },
+            h("input", {
+              type: "checkbox",
+              checked: wake.enabled !== false,
+              onChange: (e) => setWake((w) => ({ ...w, enabled: e.target.checked })),
+              style: { width: "14px", height: "14px", cursor: "pointer", accentColor: "#3fb950" },
+            }),
+            h("span", { style: { fontSize: "12px" } }, "开启概率唤醒"),
+            h("span", { style: { fontSize: "11px", opacity: 0.55 } },
+              wake.enabled !== false
+                ? "按下面的概率和间隔自己醒"
+                : "一条都不掷，只有被点名、被拍、被引用时才醒")),
+          // 开关关着的时候整组变灰、点不动。下面这几项只有开着才有意义，
+          // 留着能改反而会让人以为改了有用——实际一条都不会掷。
+          h("div", {
+            style: {
+              display: "flex", flexDirection: "column", gap: "10px",
+              ...(wake.enabled === false
+                ? { opacity: 0.35, pointerEvents: "none", userSelect: "none" }
+                : {}),
+            },
+          },
+          SettingsField("没被点名时，每条消息醒过来的概率",
+            h("input", {
+              type: "number", min: 0, max: 100, step: 1, style: INPUT,
+              disabled: wake.enabled === false,
+              value: wake.probabilityPercent ?? 0,
+              onChange: (e) => setWake((w) => ({ ...w, probabilityPercent: e.target.value })),
+            }),
+            "单位百分比。0 就是从不，10 是十条里挑一条。醒归醒，说不说照下面那条"),
+          SettingsField("一直有人说话时，最多攒多久必须投一次",
+            h("input", {
+              type: "number", min: 0, max: 1440, step: 1, style: INPUT,
+              disabled: wake.enabled === false,
+              value: wake.intervalMin ?? 10,
+              onChange: (e) => setWake((w) => ({ ...w, intervalMin: e.target.value })),
+            }),
+            "单位分钟。群里再热闹，攒满这段时间也必须投一次"),
+          SettingsField("醒的时候最多带前几条",
+            h("input", {
+              type: "number", min: 0, max: 200, step: 1, style: INPUT,
+              disabled: wake.enabled === false,
+              value: wake.contextCount ?? 3,
+              onChange: (e) => setWake((w) => ({ ...w, contextCount: e.target.value })),
+            }),
+            "只带最近的几条。攒了一天的闲聊不全塞，不然一次比每条都投还贵"),
+          SettingsField("最多带多少字",
+            h("input", {
+              type: "number", min: 0, max: 200000, step: 100, style: INPUT,
+              disabled: wake.enabled === false,
+              value: wake.contextChars ?? 6000,
+              onChange: (e) => setWake((w) => ({ ...w, contextChars: e.target.value })),
+            }),
+            "跟上面那条双卡，哪个先超就按哪个丢"),
+          SettingsField("醒过来之后怎么做",
+            h("textarea", {
+              rows: 3,
+              disabled: wake.enabled === false,
+              placeholder: "例：看见话题想加入就加入，没兴趣当看了一眼，可以沉默",
+              style: { ...INPUT, resize: "vertical", lineHeight: "1.6", fontFamily: "inherit" },
+              value: wake.guidance ?? "",
+              onChange: (e) => setWake((w) => ({ ...w, guidance: e.target.value })),
+            }),
+            "这段话会拼在唤醒消息的头部下面，每次叫醒都带上"),
+          ),
+        ),
         accounts === null
           ? h("div", { style: { fontSize: "12px", opacity: 0.6 } }, "读取中…")
           : accounts.length === 0

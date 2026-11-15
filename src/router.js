@@ -81,7 +81,7 @@ function isTempSession(kind, ev) {
 }
 
 export class Router {
-  constructor({ ctx, store, accounts, log, followupTimeoutMs, maxQueueAgeMs, label, batchQuietMs, criticalQuietMs, batchMaxWaitMs, groupWakeMode, contextMaxCount, contextMaxChars }) {
+  constructor({ ctx, store, accounts, log, followupTimeoutMs, maxQueueAgeMs, label, batchQuietMs, criticalQuietMs, batchMaxWaitMs, groupWakeMode, groupWakeRandom, groupWakeProbability, contextMaxCount, contextMaxChars, wakeGuidance }) {
     this.ctx = ctx
     this.store = store
     this.accounts = accounts
@@ -107,9 +107,17 @@ export class Router {
     // 群里默认只在被叫的时候投。闲聊只记账，等被点名/被拍/被引用时一起带过去。
     // 设成 all 就恢复「来一条投一条」那种老行为。
     this.groupWakeMode = String(groupWakeMode ?? 'mention').trim() === 'all' ? 'all' : 'mention'
+    // 没被点名时的唤醒概率。0 = 从不（默认），0.1 = 十个百分点。
+    // 按条掷骰子，不按批：一批里攒了十条也只掷一次，免得热闹时概率被放大。
+    this.groupWakeProbability = Number(groupWakeProbability) > 0 ? Math.min(1, Number(groupWakeProbability)) : 0
+    // 概率唤醒的总闸。关掉就一条都不掷，群里只有被叫才醒——想彻底关掉这套的人不用去改概率。
+    this.groupWakeRandom = groupWakeRandom !== false
     // 被叫起来时带多少前因：条数和字符都卡，超了丢老的。
-    this.contextMaxCount = Number(contextMaxCount) > 0 ? Number(contextMaxCount) : 20
+    this.contextMaxCount = Number(contextMaxCount) > 0 ? Number(contextMaxCount) : 3
     this.contextMaxChars = Number(contextMaxChars) > 0 ? Number(contextMaxChars) : 6000
+    // 醒来之后该怎么做事。由设定页填，拼在唤醒头的下面——模型第一眼就看见，
+    // 不然「可以沉默」「接一句就好」这类话没人说给它听，它就会长篇回。
+    this.wakeGuidance = String(wakeGuidance ?? '').trim()
   }
 
   /**
@@ -320,8 +328,18 @@ export class Router {
       // 群里平时不投：闲聊只记账，等被叫的时候连前因一起带过去。
       // 这一条能吃掉八成噪音——群热闹时回合数不再跟消息条数走。
       if (kind === 'group' && !critical && this.groupWakeMode === 'mention') {
-        this.logEvent(account, kind, target, row.seq, '搁置', '原因=群里没点名，只记账')
-        return
+        // 总闸关着就一条都不掷：这是「只认被叫」那档，连计入攒批都不进。
+        if (!this.groupWakeRandom) {
+          this.logEvent(account, kind, target, row.seq, '搁置', '原因=概率唤醒已关，只记账')
+          return
+        }
+        // 概率唤醒：没被点名也偶尔醒一次。醒来看见什么说什么，也可以只是看一眼——那由人格定。
+        // 掷不中就还是只记账，攒着等真被叫时一起带过去。
+        if (!(this.groupWakeProbability > 0 && Math.random() < this.groupWakeProbability)) {
+          this.logEvent(account, kind, target, row.seq, '搁置', '原因=群里没点名，只记账')
+          return
+        }
+        this.logEvent(account, kind, target, row.seq, '唤起', '原因=概率唤醒')
       }
 
       this.queue(account, kind, target, key, critical)
@@ -384,6 +402,7 @@ export class Router {
     const batch = first && last ? '［批 ' + first + '-' + last + overlapNote + '］' : ''
     lines.push((this.label ? '[' + this.label + '] ' : '') + batch + head)
     lines.push('回话：qq_send(account="' + account.id + '", kind="' + kind + '", target="' + target + '")')
+    if (this.wakeGuidance) lines.push('准则：' + this.wakeGuidance)
     for (const row of rows) {
       const who = row.nickname ? row.nickname + '(' + row.userId + ')' : row.userId
       // 身份写在这里，上层才分得开：主人说的、自己说的、外人说的是三套处置。

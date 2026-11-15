@@ -181,7 +181,7 @@ export class Store {
    * 必须双卡：条数和字符都要有上限。群里热闹一天没人点我，晚上一次把几百条全投进去，
    * 那一下比每条都投还贵。超了丢老的、留最近的——接着聊靠的是近处那几句。
    */
-  pendingAll(key, { maxCount = 20, maxChars = 6000 } = {}) {
+  pendingAll(key, { maxCount = 3, maxChars = 6000 } = {}) {
     const c = this.get(key)
     if (!c) return []
     // 老状态文件里没有这个字段，这儿也补一手：pendingAll 走的是 get，不过 ensure。

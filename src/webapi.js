@@ -35,7 +35,7 @@ function 解工作区(name) {
 function 收号表(value) {
   if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean)
   return String(value ?? '')
-    .split(/[,，\s]+/)
+    .split(/[,，、;；\s]+/)
     .map((v) => v.trim())
     .filter(Boolean)
 }
@@ -120,6 +120,16 @@ export function registerWebApi(ctx, hub, config, log) {
         return 回(res, 200, {
           ok: true,
           editor: Boolean(ctx.get('configEditor')),
+          // 设置页要显示的全局项：这三个不按号分，一份管三个号。
+          wake: {
+            mode: String(config?.groupWakeMode ?? 'mention'),
+            enabled: config?.groupWakeRandom !== false,
+            probabilityPercent: Math.round(Number(config?.groupWakeProbability ?? 0) * 1000) / 10,
+            intervalMin: Math.round((Number(config?.batchMaxWaitSec ?? 600) / 60) * 10) / 10,
+            guidance: String(config?.wakeGuidance ?? ''),
+            contextCount: Number(config?.contextMaxCount ?? 3),
+            contextChars: Number(config?.contextMaxChars ?? 6000)
+          },
           accounts: await collectStatus(hub, config)
         })
       }
@@ -252,15 +262,37 @@ export function registerWebApi(ctx, hub, config, log) {
           return 回(res, 200, { ok: false, error: '请求体不是 JSON' })
         }
         const wanted = Array.isArray(body?.accounts) ? body.accounts : []
-        if (wanted.length === 0) return 回(res, 200, { ok: false, error: '没有要改的账号' })
+        const wake = body?.wake && typeof body.wake === 'object' ? body.wake : null
+        if (wanted.length === 0 && !wake) return 回(res, 200, { ok: false, error: '没有要改的东西' })
         const entry = editor.entries().find((e) => e.options?.id === 'qq-gateway')
         if (!entry) return 回(res, 200, { ok: false, error: '找不到 qq-gateway 这条配置' })
         try {
           await editor.edit(entry, (current) => {
             const accounts = Array.isArray(current?.accounts) ? current.accounts : []
             const patchById = new Map(wanted.map((a) => [String(a.id ?? ''), a]))
+            const nextWake = { ...current }
+            if (wake) {
+              if (wake.enabled !== undefined) nextWake.groupWakeRandom = Boolean(wake.enabled)
+              if (wake.probabilityPercent !== undefined) {
+                const p = Number(wake.probabilityPercent)
+                nextWake.groupWakeProbability = Number.isFinite(p) ? Math.max(0, Math.min(100, p)) / 100 : 0
+              }
+              if (wake.intervalMin !== undefined) {
+                const m = Number(wake.intervalMin)
+                nextWake.batchMaxWaitSec = Number.isFinite(m) ? Math.max(0, Math.min(1440, m)) * 60 : 600
+              }
+              if (wake.guidance !== undefined) nextWake.wakeGuidance = String(wake.guidance)
+              if (wake.contextCount !== undefined) {
+                const n = Number(wake.contextCount)
+                nextWake.contextMaxCount = Number.isFinite(n) ? Math.max(0, Math.min(200, n)) : 3
+              }
+              if (wake.contextChars !== undefined) {
+                const n = Number(wake.contextChars)
+                nextWake.contextMaxChars = Number.isFinite(n) ? Math.max(0, Math.min(200000, n)) : 6000
+              }
+            }
             return {
-              ...current,
+              ...nextWake,
               accounts: accounts.map((account) => {
                 const patch = patchById.get(String(account?.id ?? ''))
                 if (!patch) return account

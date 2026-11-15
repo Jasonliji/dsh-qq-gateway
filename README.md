@@ -47,7 +47,7 @@ accounts:
 
 | 项 | 默认 | 干什么 |
 |---|---|---|
-| `contextMaxCount` | 20 | 被叫起来时最多带前几条攒下的消息 |
+| `contextMaxCount` | 3 | 被叫起来时最多带前几条攒下的消息，只带最近的 |
 | `contextMaxChars` | 6000 | 同上，按字符卡。攒一天的闲聊不能一股脑塞进去 |
 | `batchQuietSec` | 15 | 群里安静多少秒才把攒下的几条一起投一次。调小反应快但回合多、费 token |
 | `criticalQuietSec` | 1.2 | 私聊、@ 到你、引用你那条的静默窗。问话不能慢慢攒 |

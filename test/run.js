@@ -496,8 +496,10 @@ async function main() {
     await new Promise((r) => setTimeout(r, 1600))
     check('被点名才投', box.length === 1, 'box=' + box.length)
     const t = box[0]?.content?.[0]?.text ?? ''
-    check('闲聊被当上下文一起带上', t.includes('闲聊一') && t.includes('闲聊三'), t.slice(0, 200))
+    check('闲聊被当上下文一起带上', t.includes('闲聊二') && t.includes('闲聊三'), t.slice(0, 200))
     check('点名那条也在里面', t.includes('点你名'), t.slice(0, 200))
+    // 默认只带最近三条：四条前因时最早那条要被挤掉，不然「攒着的上限」等于没设
+    check('超出三条的老前因被挤掉', !t.includes('闲聊一'), t.slice(0, 200))
   }
 
   console.log('\n[21] 攒太多时只带近处那几条')
@@ -508,7 +510,7 @@ async function main() {
       ownStore.push('k', { messageId: 'z' + i, userId: '111111', text: '第' + i + '条', at: '12:00' })
     }
     const rows = ownStore.pendingAll('k')
-    check('默认最多二十条', rows.length === 20, 'rows=' + rows.length)
+    check('默认最多三条', rows.length === 3, 'rows=' + rows.length)
     check('留的是最近那几条', rows[rows.length - 1].text === '第29条', rows[rows.length - 1].text)
     check('老的被丢掉了', !rows.some((r) => r.text === '第0条'))
 

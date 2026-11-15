@@ -119,7 +119,10 @@ export function createHub(ctx, config = {}, log = () => {}) {
     criticalQuietMs: Number(config?.criticalQuietSec ?? 1.2) * 1000,
     batchMaxWaitMs: Number(config?.batchMaxWaitSec ?? 600) * 1000,
     groupWakeMode: config?.groupWakeMode,
-    contextMaxCount: Number(config?.contextMaxCount ?? 20),
+      groupWakeRandom: config?.groupWakeRandom,
+    groupWakeProbability: config?.groupWakeProbability,
+    wakeGuidance: config?.wakeGuidance,
+    contextMaxCount: Number(config?.contextMaxCount ?? 3),
     contextMaxChars: Number(config?.contextMaxChars ?? 6000)
   })
   const hub = { accounts, store, router }
@@ -169,6 +172,11 @@ export function createHub(ctx, config = {}, log = () => {}) {
       if (typeof timer.unref === 'function') timer.unref()
     }
     log('起来了：' + accounts.length + ' 个账号，' + accounts.filter((a) => a.session).length + ' 个配了会话')
+    // 把群唤醒策略打出来：概率是个静默配置，不写一行日志就没法确认它到底读没读到。
+    // 开关关着的时候概率是不生效的，这行必须说清楚，否则日志上按 10% 掷、实际一条都不掷，排查时会被它骗。
+    log('群唤醒：' + String(router?.groupWakeMode ?? 'mention') + (router?.groupWakeRandom === false
+      ? '，概率唤醒已关，只认被点名'
+      : '，没被点名时每条按 ' + String((router?.groupWakeProbability ?? 0) * 100) + '% 掷'))
   }
 
   const dispose = () => {
