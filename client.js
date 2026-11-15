@@ -244,7 +244,7 @@ window.__ModuleLoader__.load({
             style: INPUT, value: v.uin || "", placeholder: acc.selfId || "填这个连接对应的 QQ 号",
             onChange: (e) => set("uin", e.target.value),
           }),
-          (mismatch ? actual + "，跟你填的对不上" : actual) +
+          "只能填一个。" + (mismatch ? actual + "，跟你填的对不上" : actual) +
             "。填这个连接该是哪个号，对不上会标出来——省得端口接错，消息串进别人的会话"),
         SettingsField("关联对话",
           h("select", {
@@ -264,19 +264,19 @@ window.__ModuleLoader__.load({
             style: INPUT, value: v.owner || "", placeholder: "100000000",
             onChange: (e) => set("owner", e.target.value),
           }),
-          "只有这个号说的话算指令，其余标成外人"),
+          "只能填一个。只有这个号说的话算指令，其余标成外人"),
         SettingsField("私聊白名单",
           h("input", {
             style: INPUT, value: v.privateList || "", placeholder: "逗号分隔，例：100000000",
             onChange: (e) => set("privateList", e.target.value),
           }),
-          "空着就是谁都不理"),
+          "多个用逗号隔开，顿号、分号、空格也认。空着就是谁都不理"),
         SettingsField("群聊白名单",
           h("input", {
             style: INPUT, value: v.groupsList || "", placeholder: "逗号分隔，例：100000001",
             onChange: (e) => set("groupsList", e.target.value),
           }),
-          "空着就是哪个群都不理"),
+          "多个用逗号隔开，顿号、分号、空格也认。空着就是哪个群都不理"),
       );
     }
 
