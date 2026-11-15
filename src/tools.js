@@ -1,0 +1,331 @@
+// 统一工具。几个 QQ 号共用这一套，靠 account 参数分开，不再每号镜像一份。
+//
+// 参数规则写在参数上，描述只讲行为；别在这里解释内部怎么连后端。
+
+// QQ 单条正文的实际上限没那么宽。留在这个数以内，超了拆几条。
+const MAX_TEXT = 3000
+
+const TEXT_OUT = {
+  schema: { type: 'string' },
+  render: (_args, value) => [{ type: 'text', text: String(value ?? '') }]
+}
+
+function pickAccount(hub, id) {
+  const want = String(id || '').trim()
+  if (!want) {
+    if (hub.accounts.length === 1) return hub.accounts[0]
+    throw new Error('有 ' + hub.accounts.length + ' 个账号，account 必须给：' + hub.accounts.map((a) => a.id).join(', '))
+  }
+  const hit = hub.accounts.find((a) => a.id === want)
+  if (!hit) throw new Error('没有账号 ' + want + '。可用：' + hub.accounts.map((a) => a.id).join(', '))
+  return hit
+}
+
+function targetKey(account, kind, target) {
+  return account.id + '/' + kind + ':' + String(target)
+}
+
+/** OneBot 的 message 既收字符串也收段数组；这里统一成段，方便带 @ 和回复。 */
+function buildMessage(text, { atUserId, replyToMessageId } = {}) {
+  const segs = []
+  const replyId = String(replyToMessageId ?? '').trim()
+  if (replyId) segs.push({ type: 'reply', data: { id: replyId } })
+  const at = String(atUserId ?? '').trim()
+  if (at) segs.push({ type: 'at', data: { qq: at } })
+  segs.push({ type: 'text', data: { text: String(text ?? '') } })
+  return segs
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+export function registerTools({ register, hub, log }) {
+  register({
+    name: 'qq_status',
+    description: [
+      '看每个 QQ 账号现在连没连上、登录的是哪个号、消息路由到哪个会话。',
+      '',
+      '排查「消息没进来」或者「发不出去」时先看这个：它区分是后端连不上、没登录、还是账号没配会话。'
+    ].join('\n'),
+    parameters: {},
+    output: TEXT_OUT,
+    async execute() {
+      const lines = []
+      if (!hub.accounts.length) return '还没有配任何 QQ 账号。'
+      for (const account of hub.accounts) {
+        const c = account.client
+        const probe = await c.probe()
+        lines.push('账号 ' + account.id + '：' + (probe.ok ? '在线 ' + probe.nickname + '(' + probe.selfId + ')' : '掉线（' + probe.error + '）'))
+        lines.push('  后端 ' + c.httpUrl + (c.wsUrl ? ' / ' + c.wsUrl : ' / 无 WS'))
+        lines.push('  会话 ' + (account.session || '（未配，收到消息不投）'))
+        lines.push('  主人 ' + (account.owner || '（未配，所有话都当外人）'))
+        const allow = account.allow ?? {}
+        const p = (allow.private ?? []).join(',') || '空'
+        const g = (allow.groups ?? []).join(',') || '空'
+        lines.push('  白名单 私聊 ' + p + '；群 ' + g)
+        const d = account.lastDelivery
+        if (d) {
+          lines.push('  最近投递 ' + (d.ok ? '成功' : '失败：' + d.error) + '（' + d.at + (d.ms !== undefined ? '，' + d.ms + 'ms' : '') + '）')
+        }
+      }
+      return lines.join('\n')
+    }
+  })
+
+  register({
+    name: 'qq_send',
+    description: [
+      '往一个 QQ 会话发一条或多条消息，多个账号共用这一个工具，用 account 选是谁的号在说。',
+      '',
+      '发多条时按 intervalMs 拉开间隔；真人不会一口气补完，需要连发才拆成多条，同一句话别拆开。',
+      '群聊要人接话就带 atUserId，@ 了就是点名；只是接着聊不必 @。'
+    ].join('\n'),
+    parameters: {
+      account: { type: 'string', description: '账号别名，见 qq_status。只有一个账号时可省略。' },
+      kind: { type: 'string', required: true, description: 'private 或 group。' },
+      target: { type: 'string', required: true, description: '私聊填对方 QQ 号，群聊填群号。' },
+      messages: { type: 'string', required: true, description: '要发的话，一律按字符串传。发多条就传一个 JSON 数组字符串，例 ["第一句","第二句"]，会被拆成多条；单条直接给正文。别把一句完整的话拆成两条。' },
+      atUserId: { type: 'string', description: '群聊里要 @ 的 QQ 号。只在不点名叫人接的时候省略。' },
+      replyToMessageId: { type: 'string', description: '要引用回复的那条消息的 id。上下文唯一时不要引用。' },
+      intervalMs: { type: 'number', description: '多条之间的间隔毫秒，默认按字数算，最少 800。' }
+    },
+    output: TEXT_OUT,
+    async execute(args) {
+      const account = pickAccount(hub, args?.account)
+      const kind = String(args?.kind || '').trim()
+      if (kind !== 'private' && kind !== 'group') throw new Error('kind 只能是 private 或 group')
+      const target = String(args?.target || '').trim()
+      if (!target) throw new Error('target 不能空')
+      // messages 收三种写法，别让调用方猜：
+      //   字符串 → 一条
+      //   字符串数组 → 多条
+      //   长得像 JSON 数组的字符串 → 先按 JSON 解，解不开就当一条正文发出去
+      const raw = args?.messages
+      let list
+      if (Array.isArray(raw)) {
+        list = raw
+      } else if (typeof raw === 'string') {
+        const trimmed = raw.trim()
+        if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+          try {
+            const parsed = JSON.parse(trimmed)
+            list = Array.isArray(parsed) ? parsed : [raw]
+          } catch {
+            list = [raw]
+          }
+        } else {
+          list = [raw]
+        }
+      } else {
+        list = [raw]
+      }
+      list = list.map((x) => String(x ?? '')).filter((x) => x.length > 0)
+      if (!list.length) throw new Error('messages 是空的，没东西可发')
+      // 后端对单条长度有上限，超了整条被拒。与其让它悄悄失败，不如在这里就拦下来说清楚。
+      const tooLong = list.find((t) => t.length > MAX_TEXT)
+      if (tooLong) {
+        throw new Error('有一条 ' + tooLong.length + ' 字，超过上限 ' + MAX_TEXT + '，后端会拒。拆成几条发')
+      }
+
+      const action = kind === 'group' ? 'send_group_msg' : 'send_private_msg'
+      const idField = kind === 'group' ? 'group_id' : 'user_id'
+      const gap = Math.max(800, Number(args?.intervalMs) || 0)
+      const sent = []
+      const failed = []
+      for (let i = 0; i < list.length; i++) {
+        const text = list[i]
+        if (i > 0) await sleep(args?.intervalMs ? gap : Math.min(6000, 900 + text.length * 40))
+        try {
+          const data = await account.client.call(action, {
+            [idField]: kind === 'group' ? Number(target) : Number(target),
+            message: buildMessage(text, { atUserId: args?.atUserId, replyToMessageId: args?.replyToMessageId })
+          })
+          const mid = String(data?.message_id ?? '')
+          sent.push({ text, messageId: mid })
+          hub.store.pushSelf(targetKey(account, kind, target), text, '', mid)
+        } catch (error) {
+          failed.push({ text, error: error?.message ?? String(error) })
+        }
+      }
+      const lines = ['账号 ' + account.id + ' → ' + (kind === 'group' ? '群 ' : '私聊 ') + target]
+      lines.push('发出去 ' + sent.length + ' 条' + (failed.length ? '，失败 ' + failed.length + ' 条' : ''))
+      for (const f of failed) lines.push('  失败：' + f.error + ' | ' + f.text.slice(0, 40))
+      return lines.join('\n')
+    }
+  })
+
+  register({
+    name: 'qq_read',
+    description: [
+      '读一个 QQ 会话的消息。默认只给没读过的，带 unreadOnly=false 时给最近的几条。',
+      '',
+      '看完要收尾就调 qq_mark_read 标到返回的 readThroughSeq，别用更大的数。'
+    ].join('\n'),
+    parameters: {
+      account: { type: 'string', description: '账号别名。只有一个账号时可省略。' },
+      kind: { type: 'string', required: true, description: 'private 或 group。' },
+      target: { type: 'string', required: true, description: '私聊填对方 QQ 号，群聊填群号。' },
+      unreadOnly: { type: 'boolean', description: '只给没读过的，默认 true。' },
+      limit: { type: 'number', description: '最多几条，默认 20，上限 40。' }
+    },
+    output: TEXT_OUT,
+    async execute(args) {
+      const account = pickAccount(hub, args?.account)
+      const kind = String(args?.kind || '').trim()
+      if (kind !== 'private' && kind !== 'group') throw new Error('kind 只能是 private 或 group')
+      const target = String(args?.target || '').trim()
+      const key = targetKey(account, kind, target)
+      const unreadOnly = args?.unreadOnly !== false
+      const limit = Math.max(1, Math.min(Number(args?.limit) || 20, 40))
+      let rows
+      let meta
+      if (unreadOnly) {
+        const u = hub.store.unread(key)
+        rows = u.messages.slice(-limit)
+        meta = '未读 ' + u.unreadCount + ' 条；readThroughSeq=' + u.readThroughSeq + '；seq=' + u.seq
+      } else {
+        rows = hub.store.recent(key, limit)
+        const c = hub.store.get(key)
+        meta = '最近 ' + rows.length + ' 条；readThroughSeq=' + (c?.readThroughSeq ?? 0) + '；seq=' + (c?.seq ?? 0)
+      }
+      if (!rows.length) return meta + '\n（这个会话没有消息）'
+      const lines = [meta]
+      for (const r of rows) {
+        const mid = r.messageId ? '［id:' + r.messageId + '］' : ''
+        lines.push('[' + (r.at || '') + '] ' + (r.isSelf ? '我' : (r.nickname || r.userId)) + mid + '：' + r.text)
+      }
+      return lines.join('\n')
+    }
+  })
+
+  register({
+    name: 'qq_mark_read',
+    description: [
+      '把一个 QQ 会话的已读水位推进到某个序号，水位置后就不再往前推。',
+      '',
+      'throughSeq 用 qq_read 返回的那个数，别自己编——编大了会把没看过的消息一起标掉。'
+    ].join('\n'),
+    parameters: {
+      account: { type: 'string', description: '账号别名。只有一个账号时可省略。' },
+      kind: { type: 'string', required: true, description: 'private 或 group。' },
+      target: { type: 'string', required: true, description: '私聊填对方 QQ 号，群聊填群号。' },
+      throughSeq: { type: 'number', required: true, description: '已经看到哪个序号，用 qq_read 返回的那个数。必须给——省略等于全标已读，那一步跨太大。' }
+    },
+    output: TEXT_OUT,
+    async execute(args) {
+      const account = pickAccount(hub, args?.account)
+      const kind = String(args?.kind || '').trim()
+      if (kind !== 'private' && kind !== 'group') throw new Error('kind 只能是 private 或 group')
+      const target = String(args?.target || '').trim()
+      const key = targetKey(account, kind, target)
+      const c = hub.store.ensure(key)
+      // 省略 throughSeq 不许等于「全标已读」：一步跨太大，手滑就把没看过的全标掉。
+      if (args?.throughSeq === undefined || args?.throughSeq === null || args?.throughSeq === '') {
+        return '没动。throughSeq 必须给，用 qq_read 返回的那个数。现在 readThroughSeq=' + c.readThroughSeq + '；seq=' + c.seq
+      }
+      const r = hub.store.markRead(key, Number(args.throughSeq))
+      return '标了 ' + r.changed + ' 条；readThroughSeq=' + r.readThroughSeq + '；seq=' + r.seq
+    }
+  })
+
+  register({
+    name: 'qq_profile',
+    description: [
+      '改一个 QQ 账号自己的昵称和个性签名。',
+      '',
+      '这是对外生效的改动，会立刻改到账号资料上；两个都没给就只查当前资料不改。'
+    ].join('\n'),
+    parameters: {
+      account: { type: 'string', description: '账号别名。只有一个账号时可省略。' },
+      nickname: { type: 'string', description: '新昵称。不给就不改。' },
+      signature: { type: 'string', description: '新个性签名。不给就不改。' }
+    },
+    output: TEXT_OUT,
+    async execute(args) {
+      const account = pickAccount(hub, args?.account)
+      const nickname = String(args?.nickname ?? '').trim()
+      const signature = String(args?.signature ?? '').trim()
+      if (!nickname && !signature) {
+        const info = await account.client.call('get_login_info')
+        return '账号 ' + account.id + '：昵称 ' + (info?.nickname ?? '?') + '；号 ' + (info?.user_id ?? '?')
+      }
+      const params = {}
+      if (nickname) params.nickname = nickname
+      if (signature) params.personal_note = signature
+      await account.client.call('set_qq_profile', params)
+      const info = await account.client.call('get_login_info')
+      return '改好了。现在昵称 ' + (info?.nickname ?? nickname) + (signature ? '，签名已设' : '')
+    }
+  })
+
+  register({
+    name: 'qq_poke',
+    description: [
+      '拍一拍某个 QQ 号。群里拍要指定拍谁，私聊就是拍对方。',
+      '',
+      '比发一句话轻，适合用来接一下、提醒一下，不必凑一句正文的时候。'
+    ].join('\n'),
+    parameters: {
+      account: { type: 'string', description: '账号别名。只有一个账号时可省略。' },
+      kind: { type: 'string', required: true, description: 'private 或 group。' },
+      target: { type: 'string', required: true, description: '私聊填对方 QQ 号，群聊填群号。' },
+      userId: { type: 'string', description: '群里要拍谁的 QQ 号。私聊可省略，默认拍对方。' }
+    },
+    output: TEXT_OUT,
+    async execute(args) {
+      const account = pickAccount(hub, args?.account)
+      const kind = String(args?.kind || '').trim()
+      if (kind !== 'private' && kind !== 'group') throw new Error('kind 只能是 private 或 group')
+      const target = String(args?.target || '').trim()
+      if (!target) throw new Error('target 不能空')
+      const who = String(args?.userId || (kind === 'private' ? target : '')).trim()
+      if (!who) throw new Error('群里拍谁要给 userId')
+      const params = kind === 'group'
+        ? { user_id: Number(who), group_id: Number(target) }
+        : { user_id: Number(who) }
+      await account.client.call('send_poke', params)
+      return '拍了 ' + who + ' 一下'
+    }
+  })
+
+  register({
+    name: 'qq_lookup',
+    description: [
+      '查一个 QQ 账号能看到的关系：自己加了哪些群、某个群的成员、好友列表。',
+      '',
+      '群里要 @ 谁、或者要确认对方是谁的时候用它拿号。'
+    ].join('\n'),
+    parameters: {
+      account: { type: 'string', description: '账号别名。只有一个账号时可省略。' },
+      what: { type: 'string', required: true, description: 'groups / members / friends。' },
+      groupId: { type: 'string', description: 'what=members 时必填。' },
+      limit: { type: 'number', description: '最多几条，默认 40。' }
+    },
+    output: TEXT_OUT,
+    async execute(args) {
+      const account = pickAccount(hub, args?.account)
+      const what = String(args?.what || '').trim()
+      const limit = Math.max(1, Math.min(Number(args?.limit) || 40, 200))
+      if (what === 'groups') {
+        const list = await account.client.call('get_group_list')
+        const rows = (Array.isArray(list) ? list : []).slice(0, limit)
+        if (!rows.length) return '这个号没在任何一个群里'
+        return rows.map((g) => String(g.group_id) + '  ' + String(g.group_name ?? '')).join('\n')
+      }
+      if (what === 'members') {
+        const gid = String(args?.groupId || '').trim()
+        if (!gid) throw new Error('what=members 要给 groupId')
+        const list = await account.client.call('get_group_member_list', { group_id: Number(gid) })
+        const rows = (Array.isArray(list) ? list : []).slice(0, limit)
+        if (!rows.length) return '查不到成员（可能没权限或者号不在这个群）'
+        return rows.map((m) => String(m.user_id) + '  ' + String(m.card || m.nickname || '') + (m.role === 'owner' ? ' [群主]' : m.role === 'admin' ? ' [管理]' : '')).join('\n')
+      }
+      if (what === 'friends') {
+        const list = await account.client.call('get_friend_list')
+        const rows = (Array.isArray(list) ? list : []).slice(0, limit)
+        if (!rows.length) return '好友列表是空的'
+        return rows.map((f) => String(f.user_id) + '  ' + String(f.nickname ?? f.remark ?? '')).join('\n')
+      }
+      throw new Error('what 只能是 groups / members / friends')
+    }
+  })
+}

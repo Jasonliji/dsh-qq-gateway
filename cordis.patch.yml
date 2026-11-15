@@ -1,0 +1,7 @@
+# dsh-qq-gateway bundle patch：把多账号 QQ 网关插进 host 侧插件名册。
+# 账号表走 config，不用改这里；要加号就去设置页填 accounts，改完重启 DSH 生效。
+- insert:
+    - id: qq-gateway
+      name: '@local/dsh-qq-gateway'
+      config:
+        accounts: []

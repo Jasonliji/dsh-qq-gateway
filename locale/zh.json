@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "QQ 多账号网关",
+    "description": "一套工具接管多个 QQ 号：每个号连自己的 OneBot 11 后端，收到的消息按账号路由进对应的 DSH 会话，发送和读消息共用同一组工具。",
+    "detail": "docs/DETAIL.md"
+  }
+}

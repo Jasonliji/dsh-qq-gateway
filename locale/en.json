@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "QQ multi-account gateway",
+    "description": "One set of tools for many QQ accounts: each account talks to its own OneBot 11 backend, incoming messages route to the matching DSH session by account, and sending plus reading share the same tools.",
+    "detail": "docs/DETAIL.md"
+  }
+}
