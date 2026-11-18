@@ -59,7 +59,7 @@ async function main() {
     }
   }
 
-  const router = new Router({ ctx, store, accounts, log, batchQuietMs: 1500, criticalQuietMs: 1500, groupWakeMode: 'all', batchMaxWaitMs: 60000 })
+  const router = new Router({ ctx, store, accounts, log, batchQuietMs: 1500, criticalQuietMs: 1500, groupWakeMode: 'all', batchMaxWaitMs: 60000, systemNotice: true })
   const hub = { accounts, store, router }
   const { register, defs } = makeTools()
   registerTools({ register, hub, log: () => {} })
@@ -855,6 +855,66 @@ async function main() {
     const none = createFileLogger('')
     check('没给路径就不写', none === null)
     check('默认日志路径在 DSH 家目录', logPath('').replace(/\\/g, '/').endsWith('.dsh/qq-gateway/gateway.log'), logPath(''))
+  }
+
+
+  console.log('\n[31] 会话没开着也要能叫醒')
+  {
+    const ownStore = new Store(join(tmp, 'store37.json'), {})
+    const got = []
+    const liveAgent = { followup: async (msg) => { got.push(msg) } }
+    // get 一律拿不到（会话没在跑），只有 resume 能把它读回来
+    const resumeCalls = []
+    const ownCtx = {
+      agents: {
+        get: () => undefined,
+        resume: async (opts) => {
+          resumeCalls.push(opts)
+          return { agent: liveAgent, dispose: async () => {} }
+        }
+      }
+    }
+    const r31 = new Router({ ctx: ownCtx, store: ownStore, accounts, log: () => {}, batchQuietMs: 400, criticalQuietMs: 400, groupWakeMode: 'mention' })
+    const acc31 = { id: 't31', session: 'session-dead', allow: { private: ['111111'], groups: ['555000111'] }, client }
+    const atEv = backend.groupEvent('叫一声', { messageId: 'r31a' })
+    atEv.message = [{ type: 'at', data: { qq: '3000000001' } }, { type: 'text', data: { text: '叫一声' } }]
+    r31.handleEvent(acc31, atEv)
+    await new Promise((r) => setTimeout(r, 1200))
+    check('会话没开着时走了 resume', resumeCalls.length === 1, 'calls=' + resumeCalls.length)
+    check('resume 带的是对的会话 id', resumeCalls[0]?.resumeSessionId === 'session-dead', JSON.stringify(resumeCalls[0]))
+    check('拉起来之后消息投进去了', got.length === 1, 'got=' + got.length)
+
+    // 第二条不该再 resume：handle 复用
+    const atEv2 = backend.groupEvent('再叫一声', { messageId: 'r31b' })
+    atEv2.message = [{ type: 'at', data: { qq: '3000000001' } }, { type: 'text', data: { text: '再叫一声' } }]
+    r31.handleEvent(acc31, atEv2)
+    await new Promise((r) => setTimeout(r, 1200))
+    check('第二次不再重复 resume', resumeCalls.length === 1, 'calls=' + resumeCalls.length)
+    check('第二次照样投得进去', got.length === 2, 'got=' + got.length)
+  }
+  {
+    // resume 失败要冷却：同一批重投不该每分钟撞一次同样的错
+    const ownStore = new Store(join(tmp, 'store38.json'), {})
+    let attempt = 0
+    const ownCtx = {
+      agents: {
+        get: () => undefined,
+        resume: async () => { attempt += 1; throw new Error('持久化没配') }
+      }
+    }
+    const r32 = new Router({ ctx: ownCtx, store: ownStore, accounts, log: () => {}, batchQuietMs: 300, criticalQuietMs: 300, groupWakeMode: 'mention', resumeCooldownMs: 60000 })
+    const acc32 = { id: 't32', session: 'session-boom', allow: { private: ['111111'], groups: ['555000111'] }, client }
+    const atA = backend.groupEvent('撞墙一', { messageId: 'r32a' })
+    atA.message = [{ type: 'at', data: { qq: '3000000001' } }, { type: 'text', data: { text: '撞墙一' } }]
+    r32.handleEvent(acc32, atA)
+    await new Promise((r) => setTimeout(r, 900))
+    const afterFirst = attempt
+    const atB = backend.groupEvent('撞墙二', { messageId: 'r32b' })
+    atB.message = [{ type: 'at', data: { qq: '3000000001' } }, { type: 'text', data: { text: '撞墙二' } }]
+    r32.handleEvent(acc32, atB)
+    await new Promise((r) => setTimeout(r, 900))
+    check('失败后一分钟内不再狂撞', attempt === afterFirst, 'first=' + afterFirst + ' total=' + attempt)
+    check('至少真的试过', afterFirst >= 1, 'first=' + afterFirst)
   }
 
   await backend.close()

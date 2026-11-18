@@ -36,6 +36,34 @@ function buildMessage(text, { atUserId, replyToMessageId } = {}) {
   return segs
 }
 
+/** 本地音频 → record 段。file:// 是 cqhttp 那一系的写法，SnowLuma 内部会自己转 silk。 */
+function recordSegment(filePath) {
+  const p = String(filePath).replace(/\\/g, '/')
+  return { type: 'record', data: { file: p.startsWith('file://') ? p : 'file://' + p } }
+}
+
+/** 语音消息也要能带 @ 和引用，不然回话时句子和语音对不上。 */
+function buildVoiceMessage(filePath, { atUserId, replyToMessageId } = {}) {
+  const segs = []
+  const replyId = String(replyToMessageId ?? '').trim()
+  if (replyId) segs.push({ type: 'reply', data: { id: replyId } })
+  const at = String(atUserId ?? '').trim()
+  if (at) segs.push({ type: 'at', data: { qq: at } })
+  segs.push(recordSegment(filePath))
+  return segs
+}
+
+/** 表情包段。写法 "emojiId:packageId"；只给 summary 也认，那是碰运气。 */
+function mfaceSegment(spec) {
+  const s = String(spec ?? '').trim()
+  const cut = s.indexOf(':')
+  const emojiId = cut > 0 ? s.slice(0, cut) : s
+  const packageId = cut > 0 ? s.slice(cut + 1) : ''
+  const data = { summary: s, emoji_id: emojiId }
+  if (packageId) data.emoji_package_id = packageId
+  return { type: 'mface', data }
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export function registerTools({ register, hub, log }) {
@@ -83,10 +111,12 @@ export function registerTools({ register, hub, log }) {
       account: { type: 'string', description: '账号别名，见 qq_status。只有一个账号时可省略。' },
       kind: { type: 'string', required: true, description: 'private 或 group。' },
       target: { type: 'string', required: true, description: '私聊填对方 QQ 号，群聊填群号。' },
-      messages: { type: 'string', required: true, description: '要发的话，一律按字符串传。发多条就传一个 JSON 数组字符串，例 ["第一句","第二句"]，会被拆成多条；单条直接给正文。别把一句完整的话拆成两条。' },
+      messages: { type: 'string', description: '要发的话，一律按字符串传。发多条就传一个 JSON 数组字符串，例 ["第一句","第二句"]，会被拆成多条；单条直接给正文。别把一句完整的话拆成两条。' },
       atUserId: { type: 'string', description: '群聊里要 @ 的 QQ 号。只在不点名叫人接的时候省略。' },
       replyToMessageId: { type: 'string', description: '要引用回复的那条消息的 id。上下文唯一时不要引用。' },
-      intervalMs: { type: 'number', description: '多条之间的间隔毫秒，默认按字数算，最少 800。' }
+      intervalMs: { type: 'number', description: '多条之间的间隔毫秒，默认按字数算，最少 800。' },
+      face: { type: 'string', description: '要发的表情包，写“emojiId:packageId”，这两个值在别人发表情时带得出来。多条用 JSON 数组字符串。' },
+      voice: { type: 'string', description: '要发的语音，给本机音频文件的绝对路径。mp3/wav 都行，后端会自己转成 QQ 的语音格式。多条用 JSON 数组字符串。给了它就发语音，文字和语音可以同时给。' }
     },
     output: TEXT_OUT,
     async execute(args) {
@@ -119,7 +149,40 @@ export function registerTools({ register, hub, log }) {
         list = [raw]
       }
       list = list.map((x) => String(x ?? '')).filter((x) => x.length > 0)
-      if (!list.length) throw new Error('messages 是空的，没东西可发')
+      // 语音：单条给路径，多条给 JSON 数组字符串。和文字可以同时给，先文字后语音。
+      const voiceList = []
+      const rawVoice = args?.voice
+      if (rawVoice !== undefined && rawVoice !== null && String(rawVoice).trim()) {
+        if (Array.isArray(rawVoice)) {
+          for (const v of rawVoice) if (String(v ?? '').trim()) voiceList.push(String(v).trim())
+        } else {
+          const s = String(rawVoice).trim()
+          if (s.startsWith('[') && s.endsWith(']')) {
+            try {
+              const parsed = JSON.parse(s)
+              if (Array.isArray(parsed)) for (const v of parsed) if (String(v ?? '').trim()) voiceList.push(String(v).trim())
+              else voiceList.push(s)
+            } catch { voiceList.push(s) }
+          } else {
+            voiceList.push(s)
+          }
+        }
+      }
+      const faceList = []
+      const rawFace = args?.face
+      if (rawFace !== undefined && rawFace !== null && String(rawFace).trim()) {
+        const s = String(rawFace).trim()
+        if (s.startsWith('[') && s.endsWith(']')) {
+          try {
+            const parsed = JSON.parse(s)
+            if (Array.isArray(parsed)) for (const v of parsed) if (String(v ?? '').trim()) faceList.push(String(v).trim())
+            else faceList.push(s)
+          } catch { faceList.push(s) }
+        } else {
+          faceList.push(s)
+        }
+      }
+      if (!list.length && !voiceList.length && !faceList.length) throw new Error('messages、voice、face 都空着，没东西可发')
       // 后端对单条长度有上限，超了整条被拒。与其让它悄悄失败，不如在这里就拦下来说清楚。
       const tooLong = list.find((t) => t.length > MAX_TEXT)
       if (tooLong) {
@@ -146,8 +209,54 @@ export function registerTools({ register, hub, log }) {
           failed.push({ text, error: error?.message ?? String(error) })
         }
       }
+      // 语音排在文字后面发：先让人看见字，再听见声，跟人说话的顺序一样。
+      const sentVoice = []
+      const failedVoice = []
+      for (let i = 0; i < voiceList.length; i++) {
+        const file = voiceList[i]
+        if (i > 0 || sent.length) await sleep(gap)
+        try {
+          const data = await account.client.call(action, {
+            [idField]: Number(target),
+            message: buildVoiceMessage(file, { atUserId: args?.atUserId, replyToMessageId: args?.replyToMessageId })
+          })
+          const mid = String(data?.message_id ?? '')
+          sentVoice.push({ file, messageId: mid })
+          hub.store.pushSelf(targetKey(account, kind, target), '[语音]', '', mid)
+        } catch (error) {
+          failedVoice.push({ file, error: error?.message ?? String(error) })
+        }
+      }
+
+      // 表情包排在最后：它是收尾，不该抢在话前头。
+      const sentFace = []
+      const failedFace = []
+      for (let i = 0; i < faceList.length; i++) {
+        const spec = faceList[i]
+        if (i > 0 || sent.length || sentVoice.length) await sleep(gap)
+        try {
+          const data = await account.client.call(action, {
+            [idField]: Number(target),
+            message: [mfaceSegment(spec)]
+          })
+          const mid = String(data?.message_id ?? '')
+          sentFace.push({ spec, messageId: mid })
+          hub.store.pushSelf(targetKey(account, kind, target), '[表情包 ' + spec + ']', '', mid)
+        } catch (error) {
+          failedFace.push({ spec, error: error?.message ?? String(error) })
+        }
+      }
+
       const lines = ['账号 ' + account.id + ' → ' + (kind === 'group' ? '群 ' : '私聊 ') + target]
       lines.push('发出去 ' + sent.length + ' 条' + (failed.length ? '，失败 ' + failed.length + ' 条' : ''))
+      if (sentVoice.length || failedVoice.length) {
+        lines.push('语音 ' + sentVoice.length + ' 条' + (failedVoice.length ? '，失败 ' + failedVoice.length + ' 条' : ''))
+        for (const f of failedVoice) lines.push('  语音失败：' + f.error + ' | ' + f.file)
+      }
+      if (sentFace.length || failedFace.length) {
+        lines.push('表情包 ' + sentFace.length + ' 条' + (failedFace.length ? '，失败 ' + failedFace.length + ' 条' : ''))
+        for (const f of failedFace) lines.push('  表情失败：' + f.error + ' | ' + f.spec)
+      }
       for (const f of failed) lines.push('  失败：' + f.error + ' | ' + f.text.slice(0, 40))
       return lines.join('\n')
     }
@@ -284,6 +393,30 @@ export function registerTools({ register, hub, log }) {
         : { user_id: Number(who) }
       await account.client.call('send_poke', params)
       return '拍了 ' + who + ' 一下'
+    }
+  })
+
+  register({
+    name: 'qq_faces',
+    description: [
+      '列这个号收藏的 QQ 表情，拿到 id 就能用 qq_send 的 face 参数发出去。',
+      '',
+      '别人发表情时消息里会带 emojiId 和 packageId，那两个拼成 "emojiId:packageId" 也能直接喂给 face。'
+    ].join('\n'),
+    parameters: {
+      account: { type: 'string', description: '账号别名，见 qq_status。只有一个账号时可省略。' },
+      count: { type: 'number', description: '最多列几个，默认 30，上限 100。' }
+    },
+    output: TEXT_OUT,
+    async execute(args) {
+      const account = pickAccount(hub, args?.account)
+      const n = Math.max(1, Math.min(Number(args?.count) || 30, 100))
+      const data = await account.client.call('fetch_custom_face', { count: n }, { timeout: 20000 })
+      const ids = Array.isArray(data) ? data : Array.isArray(data?.faceIds) ? data.faceIds : []
+      if (!ids.length) return '账号 ' + account.id + ' 没有收藏表情，或者后端没返回。'
+      const lines = ['账号 ' + account.id + ' 收藏表情 ' + ids.length + ' 个：']
+      for (const id of ids) lines.push('  ' + String(id))
+      return lines.join('\n')
     }
   })
 

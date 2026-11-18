@@ -61,6 +61,23 @@ export function startMockOneBot({ uin = 3000000001, nickname = '测试号' } = {
           return ok(friends)
         case 'get_status':
           return ok({ online: true, good: true })
+        case 'get_record':
+          // 真的 SnowLuma 带 out_format 会转码并回 base64，这里照那个形状造。
+          return ok({
+            file: String(params.file ?? ''),
+            duration: 3,
+            out_format: 'mp3',
+            base64: Buffer.from('fake-mp3-bytes-for-test').toString('base64')
+          })
+        case 'get_forward_msg':
+          return ok({
+            messages: [
+              { sender: { nickname: '甲' }, content: [{ type: 'text', data: { text: '转发的第一句' } }] },
+              { sender: { nickname: '乙' }, content: [{ type: 'text', data: { text: '转发的第二句' } }, { type: 'image', data: { url: 'x' } }] }
+            ]
+          })
+        case 'fetch_custom_face':
+          return ok(['face-aaa', 'face-bbb', 'face-ccc'])
         default:
           return fail('未实现的动作：' + action)
       }

@@ -123,7 +123,10 @@ export function createHub(ctx, config = {}, log = () => {}) {
     groupWakeProbability: config?.groupWakeProbability,
     wakeGuidance: config?.wakeGuidance,
     contextMaxCount: Number(config?.contextMaxCount ?? 3),
-    contextMaxChars: Number(config?.contextMaxChars ?? 6000)
+    contextMaxChars: Number(config?.contextMaxChars ?? 6000),
+    systemNotice: config?.systemNotice === true,
+    mediaEnabled: config?.mediaEnabled !== false,
+    mediaDir: String(config?.mediaDir ?? '')
   })
   const hub = { accounts, store, router }
 

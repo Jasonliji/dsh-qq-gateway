@@ -43,17 +43,27 @@ window.__ModuleLoader__.load({
       const [note, setNote] = React.useState("");
       const [busy, setBusy] = React.useState(false);
       const [hover, setHover] = React.useState(false);
+      // ComfyUI 开没开。host 那边探好塞进 status 一起回来的，这边不自己连 8188（跨域连不上）。
+      const [comfy, setComfy] = React.useState(null);
 
       const load = React.useCallback(async () => {
         try {
           const r = await fetch(STATUS_URL, { cache: "no-store" });
           const j = await r.json();
-          if (j && j.ok) { setAccounts(Array.isArray(j.accounts) ? j.accounts : []); setNote(""); }
+          if (j && j.ok) {
+            setAccounts(Array.isArray(j.accounts) ? j.accounts : []);
+            setComfy(j.comfy || null);
+            setNote("");
+          }
           else setNote((j && j.error) || "读不到状态");
         } catch (e) {
           setNote("读不到状态");
         }
       }, []);
+
+      React.useEffect(() => {
+        if (open) load();
+      }, [open, load]);
 
       React.useEffect(() => {
         load();
@@ -92,6 +102,15 @@ window.__ModuleLoader__.load({
         setTimeout(() => setNote(""), 4000);
       }
 
+      // ComfyUI 出图台：它自己常驻 8188，这边只管开标签页，不去拉起。
+      function openComfy(e) {
+        if (e && e.stopPropagation) e.stopPropagation();
+        try { window.open("http://127.0.0.1:8188/", "_blank", "noopener"); } catch (err) {}
+        setNote("开绘图台…");
+        setTimeout(() => setNote(""), 2500);
+      }
+
+      const comfyUp = !!(comfy && comfy.alive);
       const summary = total === 0 ? "QQ 0/0" : "QQ " + online + "/" + total;
 
       const row = (a) => h("div", {
@@ -135,10 +154,24 @@ window.__ModuleLoader__.load({
         },
           h("span", {
             role: "button",
+            title: comfyUp
+              ? "ComfyUI 在跑（127.0.0.1:8188），点开就是出图台"
+              : "ComfyUI 没开，点开是一页白；先跑 _start_comfy.ps1",
+            onClick: openComfy,
+            style: {
+              marginLeft: "auto", fontSize: "11px",
+              opacity: comfyUp ? 1 : 0.55,
+              color: comfyUp ? "#3fb950" : "inherit",
+              fontWeight: comfyUp ? 700 : 400,
+              cursor: "pointer", padding: "2px 4px", borderRadius: "4px",
+            },
+          }, comfyUp ? "● 绘图" : "○ 绘图"),
+          h("span", {
+            role: "button",
             title: "浏览器打开鱼塘控制台",
             onClick: openFishtalk,
             style: {
-              marginLeft: "auto", fontSize: "11px", opacity: 0.55,
+              marginLeft: "8px", fontSize: "11px", opacity: 0.55,
               cursor: "pointer", padding: "2px 4px", borderRadius: "4px",
             },
           }, "鱼塘"),

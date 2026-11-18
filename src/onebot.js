@@ -220,3 +220,43 @@ export function segmentsToText(message) {
   }
   return out.join('')
 }
+
+/**
+ * 挑出需要另作处理的段：图、语音、合并转发、表情包。
+ * 纯文本和 @ 不进来——媒体这条路上每一格都要花上下文，别的别往里塞。
+ */
+export function segmentsToMedia(message) {
+  if (!Array.isArray(message)) return []
+  const out = []
+  for (const seg of message) {
+    const type = seg?.type
+    const data = seg?.data ?? {}
+    if (type === 'image') {
+      out.push({
+        kind: 'image',
+        url: String(data.url || ''),
+        file: String(data.file || ''),
+        // sub_type=1 是收藏表情，不是拍的照片：认个名就够，别占一格上下文。
+        asFace: Number(data.sub_type ?? 0) === 1,
+        summary: String(data.summary || '')
+      })
+    } else if (type === 'record') {
+      out.push({
+        kind: 'record',
+        file: String(data.file || ''),
+        url: String(data.url || ''),
+        second: Number(data.second ?? 0) || 0
+      })
+    } else if (type === 'forward') {
+      out.push({ kind: 'forward', id: String(data.id || ''), resId: String(data.res_id || '') })
+    } else if (type === 'mface') {
+      out.push({
+        kind: 'mface',
+        url: String(data.url || ''),
+        summary: String(data.summary || ''),
+        emojiId: String(data.emoji_id || '')
+      })
+    }
+  }
+  return out
+}

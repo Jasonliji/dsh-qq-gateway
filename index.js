@@ -62,6 +62,15 @@ export const Config = Schema.object({
   followupTimeoutSec: Schema.number()
     .default(300)
     .description('投一条消息后，等会话那一边接住的上限，超时就判这条没投进去。别调太小，回合在跑时本来就要等'),
+  systemNotice: Schema.boolean()
+    .default(false)
+    .description('断线、恢复这类系统事件要不要投进会话。开着等于每断一次就把会话叫醒两次，而收到的人除了知道断了什么也做不了。关掉只写 gateway.log'),
+  mediaEnabled: Schema.boolean()
+    .default(true)
+    .description('图片、语音、合并转发、表情包这些要不要处理。关掉它们就只留标记（[图片]/[语音]），收消息这条主干照旧'),
+  mediaDir: Schema.string()
+    .default('')
+    .description('图片和语音落盘的位置。留空就用 DSH 家目录下的 qq-gateway-media'),
   groupWakeMode: Schema.string()
     .default('mention')
     .description('群聊什么时候唤醒：mention = 只在被点名、被拍、被引用时投（闲聊只记账，被叫时一起带过去）；all = 来一条投一条，吵且费'),

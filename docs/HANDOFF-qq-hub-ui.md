@@ -94,7 +94,7 @@
   - `client.js` —— 前端（新增）
   - `index.js` —— 改了三处：import、apply 里挂 webapi、Config 加 `snowlumaStartScript`
   - `package.json` —— 加了 `exports['./client']` 和 `dsh.client`
-- 改前备份：`D:\backup\2026-11-15-qq-hub-ui\qq-bridge-v2.bak`（整个插件目录，不含 node_modules）
+- 改前备份：整个插件目录做一份拷贝（不含 node_modules），放在自己的备份区即可
 - 原 `dsh-qq-hub` 源码：**已删除，无备份**。`fs.rmSync` 是永久删除，回收站里也没有
 - 坑记录：`qq-bridge-v2/docs/PITFALLS.md` 第 13、14 条
 

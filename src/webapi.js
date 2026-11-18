@@ -15,10 +15,19 @@ const PREFIX = '/dsh-qq-gateway'
 
 // 鱼塘 = fishtalk 的批注台（fishtalk label）。端口固定 8765：快捷入口的地址不能一次一换。
 // 数据在 ~/.fishtalk，跟命令行共用一份，别让它回落到 cwd 下的空目录。
-const FISHTALK_DIR = '<工作区>\\tools\\fishtalk-main'
+// 2026-11-17：这行原来是 <工作区> 字面量，脱敏脚本把它替掉了，鱼塘按钮一直报「脚本不在」。
+// 这里是本机专用路径，别当成秘密再替换掉，换了就要改这行。
+const FISHTALK_DIR = 'F:\\AI\\dshword\\tools\\fishtalk-main'
 const FISHTALK_DATA = path.join(os.homedir(), '.fishtalk')
 const FISHTALK_PORT = 8765
 const FISHTALK_URL = 'http://127.0.0.1:' + FISHTALK_PORT + '/'
+
+// 出图台 = ComfyUI，常驻 8188。侧边栏那个「绘图」按钮要能看出它到底开没开，
+// 所以这里探一下：活着就把字染绿加粗，死了就灰着，点开也不会是一页白。
+const COMFY_PORT = 8188
+const COMFY_URL = 'http://127.0.0.1:' + COMFY_PORT + '/'
+// 侧边栏 15 秒轮询一次，每次都真去连太浪费，5 秒内复用上一次的结果。
+let comfyCache = { at: 0, value: null }
 
 /** 把 DSH 存在盘上的工作区目录名还原成路径：--D-AI-lan_work-- → D:\AI\lan_work。 */
 function 解工作区(name) {
@@ -66,6 +75,22 @@ function 回(res, code, obj) {
     'content-length': Buffer.byteLength(s)
   })
   res.end(s)
+}
+
+/** 探一下 ComfyUI 在不在。连不上就当没开，不抛错、不拖住接口。 */
+async function probeComfy() {
+  const now = Date.now()
+  if (comfyCache.value && now - comfyCache.at < 5000) return comfyCache.value
+  let alive = false
+  let error = ''
+  try {
+    const r = await fetch(COMFY_URL, { signal: AbortSignal.timeout(1200) })
+    alive = r.status < 500
+  } catch (err) {
+    error = String(err?.message ?? err)
+  }
+  comfyCache = { at: now, value: { alive, port: COMFY_PORT, url: COMFY_URL, error } }
+  return comfyCache.value
 }
 
 /** 逐个号问一遍登录态。跟 qq_status 工具同一套 probe，不另起一路。 */
@@ -130,7 +155,8 @@ export function registerWebApi(ctx, hub, config, log) {
             contextCount: Number(config?.contextMaxCount ?? 3),
             contextChars: Number(config?.contextMaxChars ?? 6000)
           },
-          accounts: await collectStatus(hub, config)
+          accounts: await collectStatus(hub, config),
+          comfy: await probeComfy()
         })
       }
 

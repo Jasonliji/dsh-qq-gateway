@@ -57,18 +57,21 @@ accounts:
 | `probeIntervalSec` | 120 | 多久探一次登录态，写进 `qq_status`。0 就不探 |
 | `stateFile` | 空 | 状态落盘位置，留空放 DSH 家目录下 |
 | `label` | 空 | 唤醒头前缀，新旧两套同时挂着时用来分辨是谁投的 |
+| `mediaEnabled` | true | 图片、语音、合并转发、表情包要不要处理。关掉只留标记，收消息的主干照旧 |
+| `mediaDir` | 空 | 图和语音落盘的位置。留空用 DSH 家目录下的 `qq-gateway-media` |
 
 ## 工具
 
 | 工具 | 干什么 |
 |---|---|
 | `qq_status` | 每个号连没连上、登录的是谁、路由到哪、最近一次投递成不成 |
-| `qq_send` | 发消息，可带 `atUserId` 点名、`replyToMessageId` 引用 |
+| `qq_send` | 发消息，可带 `atUserId` 点名、`replyToMessageId` 引用。`voice` 发语音（给本机音频路径，后端自己转 silk），`face` 发表情包（`emojiId:packageId`）。三样可以一起给，顺序是文字、语音、表情 |
 | `qq_read` | 读会话，默认只给没读过的，每行带消息 id |
 | `qq_mark_read` | 推进已读水位，只往前不往后。`throughSeq` 必须给——省略不是「全标已读」，是不动 |
 | `qq_profile` | 改自己这个号的昵称和签名 |
 | `qq_lookup` | 查群列表、群成员、好友 |
 | `qq_poke` | 拍一拍，群里要指定拍谁 |
+| `qq_faces` | 列这个号收藏的 QQ 表情，拿到 id 用 `qq_send` 的 `face` 发出去 |
 
 ## 投递的规矩
 
@@ -80,6 +83,16 @@ accounts:
 - 群里没点我名的闲聊才允许过期丢，不把旧话翻出来。
 - 后端断了、连了回来，都会往会话投一条系统消息，按账号一分钟节流。
 
+## 媒体
+
+图和声走一条单独的路，任何一样拿不到都只降级成一句说明，不拖垮消息本身。
+
+- **图片**：投递时才下载（群里九成消息不会被投，提前下载是白烧流量），压成 DSH 认的类型交给 `attachments.admitPromptContent`，图会作为真正的图块进会话。宿主不给图、或图超了限制，就落盘到 `mediaDir` 并在正文里给出路径，模型可以自己 `read_image`。
+- **语音**：先让后端 `get_record` 带 `out_format: mp3` 转码（比在插件里解 silk 稳），存成 mp3，正文里写时长和路径。不在这里做转写——需要听的时候调 `audio_transcribe`，省一次推理。要发语音就给 `qq_send.voice`，SnowLuma 内部有 `encodeSilk`，mp3 直接喂进去就行。
+- **合并转发**：`get_forward_msg` 拉出来压成「发言人：内容」的缩进文本，最多展开 60 条，多的写一句还有几条。
+- **表情包**：收藏表情（`sub_type=1`）不占上下文，只留个名字；要主动发表情用 `qq_faces` 查 id，再用 `qq_send.face`。
+- 整条路可以用 `mediaEnabled: false` 关掉。出问题时先关它，收消息这颗子不能跟着塌。
+
 ## 已知限制
 
 - **一个号一个 QQ 客户端实例，这块省不掉。** 现存能跑的 OneBot 11 实现都挂在真客户端上；纯协议那条路（go-cqhttp 配签名服务）2023 年就断了，剩下要签名的命脉在别人手里，风控也更吃亏。两个号约 1.7G，三个号往上加。
@@ -90,7 +103,8 @@ accounts:
 ## 自测
 
 ```
-node test/run.js
+node test/run.js     # 主干：路由、攒批、唤醒、工具、状态
+node test/media.js   # 媒体：图片、语音、合并转发、表情包
 ```
 
-真的 `Store`、`Router`、`OneBotClient`、`createHub`，假的 DSH ctx 和假的 OneBot 后端。起在本机随机端口，不碰任何真后端，不写 DSH profile。
+真的 `Store`、`Router`、`OneBotClient`、`createHub`、真的媒体模块，假的 DSH ctx 和假的 OneBot 后端，另有一个本地小图床。全部起在本机随机端口，不碰任何真后端，不写 DSH profile。

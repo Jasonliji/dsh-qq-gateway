@@ -5,7 +5,8 @@
 // objects），整个会话都打不开。这是 dsh-selfwake 踩出来的，照抄。
 
 import { randomUUID } from 'node:crypto'
-import { segmentsToText } from './onebot.js'
+import { segmentsToText, segmentsToMedia } from './onebot.js'
+import { resolveIncoming, defaultMediaDir } from './media.js'
 
 // 攒批：群里热闹时不能来一条投一条，那会让回合数等于消息条数，钱和吵都跟着涨。
 // 有人说话就重置计时，安静够久才投一次；但一直热闹也得有个上限，否则永远投不出去。
@@ -81,7 +82,7 @@ function isTempSession(kind, ev) {
 }
 
 export class Router {
-  constructor({ ctx, store, accounts, log, followupTimeoutMs, maxQueueAgeMs, label, batchQuietMs, criticalQuietMs, batchMaxWaitMs, groupWakeMode, groupWakeRandom, groupWakeProbability, contextMaxCount, contextMaxChars, wakeGuidance }) {
+  constructor({ ctx, store, accounts, log, followupTimeoutMs, maxQueueAgeMs, label, batchQuietMs, criticalQuietMs, batchMaxWaitMs, groupWakeMode, groupWakeRandom, groupWakeProbability, contextMaxCount, contextMaxChars, wakeGuidance, systemNotice, mediaDir, mediaEnabled }) {
     this.ctx = ctx
     this.store = store
     this.accounts = accounts
@@ -94,6 +95,16 @@ export class Router {
     // 系统事件按账号节流：断线重连会反复触发，别把会话刷成日志。
     this.systemAt = new Map()
     this.systemThrottleMs = 60000
+    // 断线、恢复默认不投。投了就是把会话叫醒一次，而收到的人除了「又断了」什么也做不了，
+    // 偏偏重连还会再来一条「恢复了」。这两条纯噪音，只留在 gateway.log 里。
+    this.systemNotice = systemNotice === true
+    // 媒体那条路可以整条关掉：出问题时先关它，收消息这颗子不能跟着塌。
+    this.mediaEnabled = mediaEnabled !== false
+    this.mediaDir = String(mediaDir || '') || defaultMediaDir()
+    // 没在跑的会话：唤醒成功过的 handle，和最近失败的时刻（冷却用，不然每批都撞一次同样的错）。
+    this.resumedAgents = new Map()
+    this.resumeFailedAt = new Map()
+    this.resumeCooldownMs = 60000
     // 申请类按账号限流，防止有人拿好友申请刷屏。
     this.requestAt = new Map()
     this.label = String(label ?? '').trim()
@@ -140,6 +151,9 @@ export class Router {
     this.pending.clear()
     this.deferred.clear()
     this.inFlight.clear()
+    // 唤醒出来的会话不在这里关：那是持久化会话，关掉等于把主人开着的窗口也弄没了。
+    this.resumedAgents.clear()
+    this.resumeFailedAt.clear()
   }
 
   findAgent(sessionId) {
@@ -154,6 +168,42 @@ export class Router {
       } catch {}
     }
     return null
+  }
+
+  /**
+   * 会话不在了也得能叫醒——@ 到你却因为「那个窗口没开」而投不进去，等于没 @。
+   * agents.get 只认活跃会话，没开的会话拿它捞不到，得走 resume 把持久化的会话读回来。
+   * 成功一次就记着，后面直接复用；失败按分钟冷却，别每批都撞同一堵墙。
+   */
+  async resumeAgent(sessionId) {
+    const want = String(sessionId || '').trim()
+    if (!want) return null
+    const key = stripSessionPrefix(want)
+    const cached = this.resumedAgents.get(key)
+    if (cached) {
+      const agent = cached?.agent
+      if (agent && typeof agent.followup === 'function') return agent
+      this.resumedAgents.delete(key)
+    }
+    const svc = this.ctx?.agents
+    if (typeof svc?.resume !== 'function') return null
+    const lastFail = this.resumeFailedAt.get(key) ?? 0
+    if (Date.now() - lastFail < this.resumeCooldownMs) return null
+    try {
+      const handle = await svc.resume({ resumeSessionId: want })
+      const agent = handle?.agent
+      if (agent && typeof agent.followup === 'function') {
+        this.resumedAgents.set(key, handle)
+        return agent
+      }
+      this.log('唤醒会话 ' + want + ' 回来但拿不到 followup，先不用它')
+      this.resumeFailedAt.set(key, Date.now())
+      return null
+    } catch (error) {
+      this.resumeFailedAt.set(key, Date.now())
+      this.log('唤醒会话失败 ' + want + '：' + (error?.message ?? error))
+      return null
+    }
   }
 
   /** 好友申请和群邀请：不算聊天消息，但没人看就永远错过去。 */
@@ -230,6 +280,7 @@ export class Router {
    * 按账号节流，重连不刷屏。
    */
   handleSystem(account, text) {
+    if (!this.systemNotice) return
     const now = Date.now()
     const last = this.systemAt.get(account.id) ?? 0
     if (now - last < this.systemThrottleMs) return
@@ -318,7 +369,10 @@ export class Router {
         at: clockOf(ev.time),
         isSelf: false,
         identity: identityOf(account, userId),
-        note: notes.join('；')
+        note: notes.join('；'),
+        // 图、语音、转发、表情包先记着原始段，等真要投的时候再下载——
+        // 群里九成消息不会被投，提前下载就是白烧流量。
+        media: segmentsToMedia(ev.message ?? ev.raw_message ?? '')
       })
       if (!row) return
 
@@ -386,7 +440,7 @@ export class Router {
     if (typeof slot.timer.unref === 'function') slot.timer.unref()
   }
 
-  composeText(account, kind, target, rows, overlapNote = '') {
+  composeText(account, kind, target, rows, overlapNote = '', mediaBySeq = null) {
     const selfName = account.client?.nickname || account.id
     // 系统事件只报状态，不给「回话」那行：这类消息不该拿 qq_send 去回。
     if (rows.every((r) => r.identity === 'system')) {
@@ -411,7 +465,10 @@ export class Router {
       const note = row.note ? '（' + row.note + '）' : ''
       // 每行都得带消息 id，不然 replyToMessageId 就是个够不着的参数，引用回复整条链是哑的。
       const mid = row.messageId ? '［id:' + row.messageId + '］' : ''
-      lines.push((row.at ? '[' + row.at + '] ' : '') + who + tag + mid + note + '：' + row.text)
+      // 媒体那条说明接在这条消息自己下面，不另起一段：谁发的图，得跟谁的话绑在一起看。
+      const extra = mediaBySeq?.get(row.seq)
+      const body = extra ? row.text + '\n    ' + extra : row.text
+      lines.push((row.at ? '[' + row.at + '] ' : '') + who + tag + mid + note + '：' + body)
     }
     return lines.join('\n')
   }
@@ -462,10 +519,16 @@ export class Router {
       this.logEvent(account, kind, target, 0, '搁置', '原因=没配 session')
       return
     }
-    const agent = this.findAgent(sessionId)
+    // 先看活跃的；会话没开着就把它读回来再投——不然 @ 到了也只是一行「拿不到 agent」。
+    let agent = this.findAgent(sessionId)
     if (!agent) {
-      this.logEvent(account, kind, target, 0, '搁置', '原因=会话 ' + sessionId + ' 拿不到 agent')
-      return
+      agent = await this.resumeAgent(sessionId)
+      if (agent) {
+        this.logEvent(account, kind, target, 0, '唤醒会话', '原因=会话没在跑，拉起来再投')
+      } else {
+        this.logEvent(account, kind, target, 0, '搁置', '原因=会话 ' + sessionId + ' 拿不到 agent')
+        return
+      }
     }
 
     // 上次试着投过的范围：本次如果盖住它，头里标出来，模型才知道哪几行不用重答。
@@ -479,10 +542,32 @@ export class Router {
       if (lo <= hi) overlapNote = '，其中 ' + lo + '-' + hi + ' 上次可能已投'
     }
 
+    // 媒体到这一步才落地：前面只记原始段，真要投了才去下载、转码、展开。
+    // 群里九成消息不会被投，提前下载全是白烧。
+    const mediaBySeq = new Map()
+    const imageParts = []
+    if (this.mediaEnabled) {
+      for (const row of rows) {
+        if (!Array.isArray(row.media) || !row.media.length) continue
+        try {
+          const got = await resolveIncoming(account, this.ctx, { media: row.media, log: this.log, dir: this.mediaDir })
+          if (got.parts.length) imageParts.push(...got.parts)
+          if (got.lines.length) mediaBySeq.set(row.seq, got.lines.join('\n    '))
+        } catch (error) {
+          // 媒体坏了不能拖垮投递：这条消息本身还是要送到，降级成一句说明。
+          mediaBySeq.set(row.seq, '[媒体没处理成：' + (error?.message ?? error) + ']')
+          this.log('媒体处理失败：' + (error?.message ?? error))
+        }
+      }
+    }
+
     const message = {
       id: randomUUID(),
       role: 'user',
-      content: [{ type: 'text', text: this.composeText(account, kind, target, rows, overlapNote) }],
+      content: [
+        { type: 'text', text: this.composeText(account, kind, target, rows, overlapNote, mediaBySeq) },
+        ...imageParts
+      ],
       source: { kind: 'qq-gateway', account: account.id }
     }
 
